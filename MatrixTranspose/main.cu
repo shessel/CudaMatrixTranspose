@@ -24,10 +24,20 @@ void transposeCpu(const Matrix<T, WIDTH, HEIGHT>& in, Matrix<T, HEIGHT, WIDTH>& 
 	}
 }
 
+template<typename T>
+struct KernelParams {
+	const T * const d_in;
+	T * const d_out;
+	unsigned int width;
+	unsigned int height;
+	dim3 gridDim;
+	dim3 blockDim;
+};
+
 template <typename T>
 float averageTime(void(*kernel)(const T * const, T * const, unsigned int, unsigned int),
-	const T * const in, T * const out, unsigned int width, unsigned int height,
-	dim3 grid, dim3 block, unsigned int numReps) {
+				  const T * const in, T * const out, unsigned int width, unsigned int height,
+				  dim3 grid, dim3 block, unsigned int numReps) {
 	float kernelTime = -1.0f;
 	cudaEvent_t start;
 	cudaEvent_t stop;
@@ -64,6 +74,12 @@ float averageTime(void(*kernel)(const T * const, T * const, unsigned int, unsign
 	return kernelTime / numReps;
 }
 
+template <typename T>
+float averageTime(void(*kernel)(const T * const, T * const, unsigned int, unsigned int),
+				  const KernelParams<T>& params, unsigned int numReps) {
+	return averageTime(kernel, params.d_in, params.d_out, params.width, params.height, params.gridDim, params.blockDim, numReps);
+}
+
 void printStatistics(float avgTime, size_t mem_size) {
 	static const unsigned int BYTES_PER_GIGABYTE = 1024 * 1024 * 1024;
 	float kernelBandwidth = 2.0f * 1000.0f * mem_size / (BYTES_PER_GIGABYTE) / (avgTime);
@@ -73,6 +89,22 @@ void printStatistics(float avgTime, size_t mem_size) {
 template <typename T, unsigned int WIDTH, unsigned int HEIGHT>
 void compare(const Matrix<T, HEIGHT, WIDTH>& toCompare, const Matrix<T, HEIGHT, WIDTH>& groundTruth) {
 	std::cout << (toCompare == groundTruth ? "Test Passed" : "Test Failed") << std::endl;
+}
+
+template <typename T>
+void testKernel(void(*kernel)(const T * const, T * const, unsigned int, unsigned int),
+				const KernelParams<T>& params, unsigned int numReps) {
+	float avgTime = averageTime(kernel, params, numReps);
+	printStatistics(avgTime, params.width * params.height * sizeof(T));
+}
+
+template <typename T, unsigned int WIDTH, unsigned int HEIGHT >
+void testKernel(void(*kernel)(const T * const, T * const, unsigned int, unsigned int),
+				const KernelParams<T>& params, unsigned int numReps,
+				Matrix<T, WIDTH, HEIGHT>& out, const Matrix<T, WIDTH, HEIGHT>& groundTruth) {
+	testKernel(kernel, params, numReps);
+	cudaMemcpy(out.getData(), params.d_out, WIDTH * HEIGHT * sizeof(T), cudaMemcpyDefault);
+	compare(out, groundTruth);
 }
 
 template <typename T, unsigned int WIDTH, unsigned int HEIGHT>
@@ -85,54 +117,39 @@ void transposeGpu(const Matrix<T, WIDTH, HEIGHT>& in, Matrix<T, HEIGHT, WIDTH>& 
 	cudaMalloc(&d_out, byteSize);
 	cudaMemcpy(d_in, in.getData(), byteSize, cudaMemcpyDefault);
 
-	float avgTime;
-
 	dim3 gridTiled(WIDTH / TILE_SIZE_X, HEIGHT / TILE_SIZE_Y);
 	dim3 blockTiled(TILE_SIZE_X, TILE_SIZE_Y);
-	avgTime = averageTime(baseLineCopy, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	printStatistics(avgTime, byteSize);
 
-	avgTime = averageTime(baseLineCopyShared, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	printStatistics(avgTime, byteSize);
+	KernelParams<T> kernelParams = { d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled };
+
+	testKernel(baseLineCopy, kernelParams, NUM_REPS);
+	testKernel(baseLineCopyShared, kernelParams, NUM_REPS);
 
 	if (WIDTH * HEIGHT < 4096) {
 		dim3 gridOne(1);
 		dim3 blockOne(1);
-		avgTime = averageTime(naiveTranspose, d_in, d_out, WIDTH, HEIGHT, gridOne, blockOne, NUM_REPS);
-		cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-		printStatistics(avgTime, byteSize);
-		compare(out, groundTruth);
+		kernelParams.gridDim = gridOne;
+		kernelParams.blockDim = blockOne;
+		testKernel(naiveTranspose, kernelParams, NUM_REPS, out, groundTruth);
 	}
 
 	dim3 gridRowWise(HEIGHT);
 	dim3 blockRowWise(WIDTH);
-	avgTime = averageTime(naiveParallelTranspose, d_in, d_out, WIDTH, HEIGHT, gridRowWise, blockRowWise, NUM_REPS);
-	cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-	printStatistics(avgTime, byteSize);
-	compare(out, groundTruth);
+	kernelParams.gridDim = gridRowWise;
+	kernelParams.blockDim = blockRowWise;
+	testKernel(naiveParallelTranspose, kernelParams, NUM_REPS, out, groundTruth);
 
-	avgTime = averageTime(naiveBlockWiseParallelTranspose, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-	printStatistics(avgTime, byteSize);
-	compare(out, groundTruth);
-
-	avgTime = averageTime(naiveSharedBlockWiseParallelTranspose, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-	printStatistics(avgTime, byteSize);
-	compare(out, groundTruth);
-
-	avgTime = averageTime(coalescedSharedBlockWiseParallelTranspose, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-	printStatistics(avgTime, byteSize);
-	compare(out, groundTruth);
-
-	avgTime = averageTime(coalescedSharedBlockWiseParallelTransposeNoBankConflicts, d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled, NUM_REPS);
-	cudaMemcpy(out.getData(), d_out, byteSize, cudaMemcpyDefault);
-	printStatistics(avgTime, byteSize);
-	compare(out, groundTruth);
+	kernelParams.gridDim = gridTiled;
+	kernelParams.blockDim = blockTiled;
+	testKernel(naiveBlockWiseParallelTranspose, kernelParams, NUM_REPS, out, groundTruth);
+	testKernel(naiveSharedBlockWiseParallelTranspose, kernelParams, NUM_REPS, out, groundTruth);
+	testKernel(coalescedSharedBlockWiseParallelTranspose, kernelParams, NUM_REPS, out, groundTruth);
+	testKernel(coalescedSharedBlockWiseParallelTransposeNoBankConflicts, kernelParams, NUM_REPS, out, groundTruth);
 
 	cudaFree(d_in);
 	cudaFree(d_out);
+
+	cudaDeviceReset();
 }
 
 int main() {
@@ -148,8 +165,6 @@ int main() {
 	Matrix<int, DIM_Y, DIM_X> gpuTransposed;
 	transposeGpu(matrix, gpuTransposed, groundTruth);
 	//std::cout << gpuTransposed << std::endl;
-
-	cudaDeviceReset();
 
 	return 0;
 }
