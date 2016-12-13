@@ -24,7 +24,9 @@ __global__ void baseLineCopy(const T * const in, T * const out, unsigned int wid
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
 
-	out[idxIn] = in[idxIn];
+	if (idxIn < width * height) {
+		out[idxIn] = in[idxIn];
+	}
 }
 
 template <typename T>
@@ -34,10 +36,12 @@ __global__ void baseLineCopyShared(const T * const in, T * const out, unsigned i
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
 
-	cache[threadIdx.y][threadIdx.x] = in[idxIn];
-	__syncthreads();
+	if (idxIn < width * height) {
+		cache[threadIdx.y][threadIdx.x] = in[idxIn];
+		__syncthreads();
 
-	out[idxIn] = cache[threadIdx.y][threadIdx.x];
+		out[idxIn] = cache[threadIdx.y][threadIdx.x];
+	}
 }
 
 template <typename T>
@@ -54,9 +58,11 @@ __global__ void naiveTranspose(const T * const in, T * const out, unsigned int w
 template <typename T>
 __global__ void naiveParallelTranspose(const T * const in, T * const out, unsigned int width, unsigned int height) {
 	unsigned int idxIn = blockIdx.x * width + threadIdx.x;
-	unsigned int idxOut = threadIdx.x * height + blockIdx.x;
 
-	out[idxOut] = in[idxIn];
+	if (idxIn < width * height) {
+		unsigned int idxOut = threadIdx.x * height + blockIdx.x;
+		out[idxOut] = in[idxIn];
+	}
 }
 
 template <typename T>
@@ -64,9 +70,11 @@ __global__ void naiveBlockWiseParallelTranspose(const T * const in, T * const ou
 	unsigned int xIndex = blockIdx.x * blockDim.x + threadIdx.x;
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
-	unsigned int idxOut = xIndex * height + yIndex;
 
-	out[idxOut] = in[idxIn];
+	if (xIndex < width && yIndex < height) {
+		unsigned int idxOut = xIndex * height + yIndex;
+		out[idxOut] = in[idxIn];
+	}
 }
 
 template <typename T>
@@ -75,12 +83,14 @@ __global__ void naiveSharedBlockWiseParallelTranspose(const T * const in, T * co
 	unsigned int xIndex = blockIdx.x * blockDim.x + threadIdx.x;
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
-	unsigned int idxOut = xIndex * height + yIndex;
 
-	cache[threadIdx.y][threadIdx.x] = in[idxIn];
-	__syncthreads();
+	if (xIndex < width && yIndex < height) {
+		cache[threadIdx.y][threadIdx.x] = in[idxIn];
+		__syncthreads();
 
-	out[idxOut] = cache[threadIdx.y][threadIdx.x];
+		unsigned int idxOut = xIndex * height + yIndex;
+		out[idxOut] = cache[threadIdx.y][threadIdx.x];
+	}
 }
 
 template <typename T>
@@ -90,15 +100,20 @@ __global__ void coalescedSharedBlockWiseParallelTranspose(const T * const in, T 
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
 
-	// write out consecutively and do transposing by swapping x and y when reading from shared memory
-	unsigned int xIndexOut = blockIdx.y * blockDim.y + threadIdx.x;
-	unsigned int yIndexOut = blockIdx.x * blockDim.x + threadIdx.y;
-	unsigned int idxOut = yIndexOut * height + xIndexOut;
+	if (xIndex < width && yIndex < height) {
+		// write out consecutively (with increasing threadIdx.x) and do
+		// transposing by swapping x and y when reading from shared memory
+		unsigned int xIndexOut = blockIdx.y * blockDim.y + threadIdx.x;
+		unsigned int yIndexOut = blockIdx.x * blockDim.x + threadIdx.y;
+		unsigned int idxOut = yIndexOut * height + xIndexOut;
 
-	cache[threadIdx.y][threadIdx.x] = in[idxIn];
-	__syncthreads();
+		cache[threadIdx.y][threadIdx.x] = in[idxIn];
+		__syncthreads();
 
-	out[idxOut] = cache[threadIdx.x][threadIdx.y];
+		if (xIndexOut < width && yIndexOut < height) {
+			out[idxOut] = cache[threadIdx.x][threadIdx.y];
+		}
+	}
 }
 
 template <typename T>
@@ -108,15 +123,20 @@ __global__ void coalescedSharedBlockWiseParallelTransposeNoBankConflicts(const T
 	unsigned int yIndex = blockIdx.y * blockDim.y + threadIdx.y;
 	unsigned int idxIn = yIndex * width + xIndex;
 
-	// write out consecutively and do transposing by swapping x and y when reading from shared memory
-	unsigned int xIndexOut = blockIdx.y * blockDim.y + threadIdx.x;
-	unsigned int yIndexOut = blockIdx.x * blockDim.x + threadIdx.y;
-	unsigned int idxOut = yIndexOut * height + xIndexOut;
+	if (xIndex < width && yIndex < height) {
+		// write out consecutively (with increasing threadIdx.x) and do
+		// transposing by swapping x and y when reading from shared memory
+		unsigned int xIndexOut = blockIdx.y * blockDim.y + threadIdx.x;
+		unsigned int yIndexOut = blockIdx.x * blockDim.x + threadIdx.y;
+		unsigned int idxOut = yIndexOut * height + xIndexOut;
 
-	cache[threadIdx.y][threadIdx.x] = in[idxIn];
-	__syncthreads();
+		cache[threadIdx.y][threadIdx.x] = in[idxIn];
+		__syncthreads();
 
-	out[idxOut] = cache[threadIdx.x][threadIdx.y];
+		if (xIndexOut < width && yIndexOut < height) {
+			out[idxOut] = cache[threadIdx.x][threadIdx.y];
+		}
+	}
 }
 
 template <typename T, unsigned int WIDTH, unsigned int HEIGHT>
@@ -168,6 +188,7 @@ float averageTime(void(*kernel)(const T * const, T * const, unsigned int, unsign
 		checkCudaStatus(cudaEventRecord(stop, 0));
 		checkCudaStatus(cudaEventSynchronize(stop));
 		checkCudaStatus(cudaEventElapsedTime(&kernelTime, start, stop));
+
 		cudaEventDestroy(start);
 		cudaEventDestroy(stop);
 	}
@@ -221,7 +242,8 @@ float averageTime(void(*kernel)(const T * const, T * const, unsigned int, unsign
 
 void printStatistics(float avgTime, size_t mem_size) {
 	static const unsigned int BYTES_PER_GIGABYTE = 1024 * 1024 * 1024;
-	float kernelBandwidth = 2.0f * 1000.0f * mem_size / (BYTES_PER_GIGABYTE) / (avgTime);
+	// (1 read + 1 write) * (size in GB) / (time in sec)
+	float kernelBandwidth = (2.0f * mem_size / (BYTES_PER_GIGABYTE)) / (avgTime / 1000.0f);
 	std::cout << avgTime << " " << mem_size << " " << kernelBandwidth << std::endl;
 }
 
@@ -256,7 +278,7 @@ void transposeGpu(const Matrix<T, WIDTH, HEIGHT>& in, Matrix<T, HEIGHT, WIDTH>& 
 	cudaMalloc(&d_out, byteSize);
 	cudaMemcpy(d_in, in.getData(), byteSize, cudaMemcpyDefault);
 
-	dim3 gridTiled(WIDTH / TILE_SIZE_X, HEIGHT / TILE_SIZE_Y);
+	dim3 gridTiled((WIDTH - 1) / TILE_SIZE_X + 1, (HEIGHT - 1) / TILE_SIZE_Y + 1);
 	dim3 blockTiled(TILE_SIZE_X, TILE_SIZE_Y);
 
 	KernelParams<T> kernelParams = { d_in, d_out, WIDTH, HEIGHT, gridTiled, blockTiled };
@@ -292,16 +314,17 @@ void transposeGpu(const Matrix<T, WIDTH, HEIGHT>& in, Matrix<T, HEIGHT, WIDTH>& 
 }
 
 int main() {
-	Matrix<int, DIM_X, DIM_Y> matrix;
-	std::iota(&matrix[0], &matrix[DIM_X * DIM_Y], 0);
+	using DataType = int;
+	Matrix<DataType, DIM_X, DIM_Y> matrix;
+	std::iota(&matrix[0], &matrix[DIM_X * DIM_Y], static_cast<DataType>(0));
 
 	//std::cout << matrix << std::endl;
 
-	Matrix<int, DIM_Y, DIM_X> groundTruth;
+	Matrix<DataType, DIM_Y, DIM_X> groundTruth;
 	transposeCpu(matrix, groundTruth);
 	//std::cout << groundTruth << std::endl;
 
-	Matrix<int, DIM_Y, DIM_X> gpuTransposed;
+	Matrix<DataType, DIM_Y, DIM_X> gpuTransposed;
 	transposeGpu(matrix, gpuTransposed, groundTruth);
 	//std::cout << gpuTransposed << std::endl;
 
